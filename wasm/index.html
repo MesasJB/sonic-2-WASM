@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonic 2</title>
+<style>
+  :root { --bg:#08090d; --panel:#10121a; --line:#232738; --text:#e8eaf2; --muted:#8b90a6; --accent:#1e6bff; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         display:flex; align-items:center; justify-content:center; padding:16px; }
+
+  .card { width:min(100%, 920px); background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; }
+
+  /* Pantalla de inicio */
+  #start { text-align:center; padding:48px 16px; }
+  #start .tag { font-size:11px; letter-spacing:.3em; color:var(--muted); text-transform:uppercase; }
+  #start h1 { font-size:clamp(34px, 7vw, 60px); margin:10px 0 6px; }
+  #start h1 span { color:var(--accent); }
+  #start p { color:var(--muted); max-width:520px; margin:0 auto 24px; line-height:1.5; }
+  button { font:inherit; cursor:pointer; border:0; border-radius:10px; padding:12px 26px; font-weight:600; }
+  #playBtn { background:#fff; color:#000; font-size:17px; }
+  #playBtn:hover { background:#e6e6e6; }
+  #playBtn:disabled { opacity:.6; cursor:default; }
+  #status { margin-top:16px; font-size:13px; color:var(--muted); min-height:18px; }
+  progress { width:min(300px, 80%); height:8px; margin-top:12px; accent-color:var(--accent); }
+
+  /* Juego */
+  #game { display:none; }
+  #stage { background:#000; border-radius:10px; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  canvas#canvas { display:block; width:100%; height:auto; aspect-ratio:424 / 240; image-rendering:pixelated; outline:none; background:#000; }
+
+  /* Pantalla completa: se escala solo con CSS, sin tocar el tamaño interno del juego */
+  #stage:fullscreen, #stage:-webkit-full-screen { width:100vw; height:100vh; border-radius:0; background:#000; }
+  #stage:fullscreen canvas#canvas, #stage:-webkit-full-screen canvas#canvas {
+    width:100vw !important; height:100vh !important; aspect-ratio:auto; object-fit:contain;
+  }
+
+  .bar { display:flex; justify-content:space-between; align-items:center; margin-top:12px; gap:12px; flex-wrap:wrap; }
+  .bar small { color:var(--muted); }
+  #diag { margin:10px 0 0; padding:10px; background:#0a0c12; border:1px solid var(--line); border-radius:8px;
+          color:#9fe3b0; font-size:12px; white-space:pre-wrap; user-select:text; }
+  button.sec { background:#1c2032; color:var(--text); border:1px solid var(--line); padding:9px 16px; margin-left:6px; }
+  button.sec:hover { background:#252a42; }
+  #fsBtnOLD { background:#1c2032; color:var(--text); border:1px solid var(--line); padding:9px 16px; }
+  #fsBtn:hover { background:#252a42; }
+</style>
+</head>
+<body>
+  <div class="card">
+
+    <div id="start">
+      <div class="tag">Decompilación RSDKv4</div>
+      <h1>Sonic <span>2</span></h1>
+      <p>Sonic the Hedgehog 2 corriendo directo en tu navegador. Al tocar Jugar se descarga el juego (unos 48 MB) y empieza solo.</p>
+      <button id="playBtn">▶ Jugar</button>
+      <div><progress id="progress" hidden max="100" value="0"></progress></div>
+      <div id="status"></div>
+    </div>
+
+    <div id="game">
+      <div id="stage">
+        <canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+      </div>
+      <div class="bar">
+        <small>Hacé clic en el juego para que tome el teclado.</small>
+        <span>
+          <button id="delBtn" class="sec">🗑 Borrar guardado</button>
+          <button id="sndBtn" class="sec">🔊 Probar sonido</button>
+          <button id="fsBtn" class="sec">⛶ Pantalla completa</button>
+        </span>
+      </div>
+      <pre id="diag" hidden></pre>
+    </div>
+
+  </div>
+
+<script>
+  var statusEl   = document.getElementById('status');
+  var progressEl = document.getElementById('progress');
+  var playBtn    = document.getElementById('playBtn');
+  var canvas     = document.getElementById('canvas');
+  var stage      = document.getElementById('stage');
+
+  // Si el navegador pierde el contexto gráfico
+  canvas.addEventListener('webglcontextlost', function (e) {
+    alert('Se perdió el contexto gráfico. Recargá la página.');
+    e.preventDefault();
+  }, false);
+
+
+  // --- Guardado persistente: el juego escribe SData.bin en memoria; lo copiamos al navegador ---
+  var SAVE_FILES = ['SData.bin', 'UData.bin'];
+  var saveInfo = { fs: false, lastSave: null, restored: [], error: null };
+  function getFS() { return Module.FS || (typeof FS !== 'undefined' ? FS : null); }
+  function bytesToB64(u8) {
+    var bin = '', CH = 0x8000;
+    for (var i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+    return btoa(bin);
+  }
+  function b64ToBytes(b64) {
+    var bin = atob(b64), u8 = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+  }
+  function restoreSaves() {
+    var fs = getFS();
+    saveInfo.fs = !!fs;
+    if (!fs) { saveInfo.error = 'FS no disponible: compilá con el compilar.bat nuevo'; return; }
+    SAVE_FILES.forEach(function (name) {
+      try {
+        var b64 = localStorage.getItem('sonic2:' + name);
+        if (b64) { fs.writeFile('/' + name, b64ToBytes(b64)); saveInfo.restored.push(name); }
+      } catch (e) { saveInfo.error = 'restaurar ' + name + ': ' + e.message; }
+    });
+  }
+  var noPersist = false;
+  function persistSaves() {
+    var fs = getFS();
+    if (!fs || noPersist) return;
+    SAVE_FILES.forEach(function (name) {
+      try {
+        var data = fs.readFile('/' + name);
+        var b64 = bytesToB64(data);
+        if (localStorage.getItem('sonic2:' + name) !== b64) {
+          localStorage.setItem('sonic2:' + name, b64);
+          saveInfo.lastSave = new Date().toLocaleTimeString();
+        }
+      } catch (e) { /* el archivo todavía no existe: no hay nada que guardar */ }
+    });
+  }
+  setInterval(persistSaves, 2000);
+  document.addEventListener('visibilitychange', function () { if (document.hidden) persistSaves(); });
+  window.addEventListener('pagehide', persistSaves);
+  window.addEventListener('beforeunload', persistSaves);
+
+  // Guardamos las líneas de log relacionadas con audio para el diagnóstico
+  var logs = [];
+  function logLine(args) {
+    var t = Array.prototype.join.call(args, ' ');
+    if (/audio|sound|sfx|vorbis|ogg|sdl|error|unable|fail/i.test(t) && logs.length < 40) logs.push(t);
+  }
+  window.addEventListener('error', function (e) { logs.push('JS error: ' + e.message); });
+  window.addEventListener('unhandledrejection', function (e) { logs.push('Promise error: ' + (e.reason && e.reason.message || e.reason)); });
+
+  // Configuración que Emscripten espera encontrar
+  var Module = {
+    canvas: canvas,
+    preRun: [restoreSaves],
+    print: function () { logLine(arguments); console.log.apply(console, arguments); },
+    printErr: function () { logLine(arguments); console.warn.apply(console, arguments); },
+    totalDependencies: 0,
+    setStatus: function (text) {
+      if (!text) { statusEl.textContent = ''; progressEl.hidden = true; return; }
+      var m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+      if (m) {
+        progressEl.hidden = false;
+        progressEl.max = parseInt(m[4]);
+        progressEl.value = parseFloat(m[2]);
+        statusEl.textContent = 'Descargando… ' + Math.round(100 * m[2] / m[4]) + '%';
+      } else {
+        statusEl.textContent = text;
+      }
+    },
+    monitorRunDependencies: function (left) {
+      this.totalDependencies = Math.max(this.totalDependencies, left);
+      if (left === 0 && this.totalDependencies > 0) window.__gameReady = true;
+      Module.setStatus(left
+        ? 'Preparando… (' + (this.totalDependencies - left) + '/' + this.totalDependencies + ')'
+        : 'Listo');
+    }
+  };
+
+  // --- Audio: el navegador solo lo permite después de un clic ---
+  function unlockAudio() {
+    try {
+      var ctx = (window.__sonicAudio && window.__sonicAudio.ctx) ||
+                (Module.SDL2 && Module.SDL2.audioContext) ||
+                (typeof SDL !== 'undefined' && SDL.audioContext);
+      if (ctx && ctx.state !== 'running') ctx.resume();
+    } catch (e) {}
+  }
+  ['click', 'keydown', 'touchstart', 'pointerdown'].forEach(function (ev) {
+    document.addEventListener(ev, unlockAudio);
+  });
+
+  // --- Botón Jugar: el juego se carga DESPUÉS del clic, así el audio queda habilitado ---
+  playBtn.addEventListener('click', function () {
+    playBtn.disabled = true;
+    playBtn.textContent = 'Cargando…';
+    Module.setStatus('Descargando…');
+
+    var s = document.createElement('script');
+    s.src = 'index.js';
+    s.onerror = function () { statusEl.textContent = 'No se pudo cargar index.js'; playBtn.disabled = false; playBtn.textContent = '▶ Jugar'; };
+    document.body.appendChild(s);
+
+    // Mostrar el juego cuando termine de descargar
+    var wait = setInterval(function () {
+      if (window.__gameReady) {
+        clearInterval(wait);
+        document.getElementById('start').style.display = 'none';
+        document.getElementById('game').style.display = 'block';
+        canvas.focus();
+        unlockAudio();
+      }
+    }, 150);
+    // Respaldo: si por algún motivo no detectamos "Listo", mostramos el juego igual
+    setTimeout(function () {
+      clearInterval(wait);
+      document.getElementById('start').style.display = 'none';
+      document.getElementById('game').style.display = 'block';
+      unlockAudio();
+    }, 120000);
+  });
+
+  canvas.addEventListener('click', function () { canvas.focus(); unlockAudio(); });
+
+  // --- Pantalla completa (sobre el contenedor, sin cambiar la resolución del juego) ---
+  document.getElementById('fsBtn').addEventListener('click', function () {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+      (stage.requestFullscreen || stage.webkitRequestFullscreen).call(stage);
+    }
+    canvas.focus();
+  });
+
+  // --- Diagnóstico y prueba de sonido ---
+  function getSdlCtx() {
+    return (window.__sonicAudio && window.__sonicAudio.ctx) ||
+           (Module.SDL2 && Module.SDL2.audioContext) ||
+           (typeof SDL !== 'undefined' && SDL.audioContext) || null;
+  }
+  function showDiag(extra) {
+    var ctx = getSdlCtx();
+    var lines = [
+      'Audio propio (Web Audio): ' + (window.__sonicAudio ? 'sí' : 'NO') + ' | SDL2 audio: ' + (Module.SDL2 ? 'sí' : 'no'),
+      'AudioContext del juego: ' + (ctx ? ctx.state + ' @ ' + ctx.sampleRate + ' Hz' : 'NO EXISTE (el juego no abrió audio)'),
+      'Pestaña silenciada por el navegador: revisá el ícono de la pestaña',
+      'Guardado: FS ' + (saveInfo.fs ? 'ok' : 'NO disponible') + ', restaurado: ' + (saveInfo.restored.join(', ') || 'nada') + ', último guardado: ' + (saveInfo.lastSave || 'ninguno todavía') + (saveInfo.error ? ' | ' + saveInfo.error : ''),
+      'Logs relacionados:'
+    ].concat(logs.length ? logs : ['  (ninguno)']);
+    if (extra) lines.unshift(extra);
+    var d = document.getElementById('diag');
+    d.hidden = false;
+    d.textContent = lines.join('\n');
+  }
+  document.getElementById('sndBtn').addEventListener('click', function () {
+    var msg;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      var c = new AC();
+      c.resume();
+      var o = c.createOscillator(), g = c.createGain();
+      g.gain.value = 0.15;
+      o.frequency.value = 440;
+      o.connect(g); g.connect(c.destination);
+      o.start(); o.stop(c.currentTime + 0.5);
+      msg = 'Prueba: tendrías que haber escuchado un pitido de medio segundo. Si NO lo oíste, el problema es de tu PC/navegador (volumen, pestaña silenciada, salida de audio).';
+    } catch (e) { msg = 'Falló la prueba de audio del navegador: ' + e.message; }
+    unlockAudio();
+    showDiag(msg);
+  });
+
+  document.getElementById('delBtn').addEventListener('click', function () {
+    if (!confirm('¿Borrar la partida guardada? No se puede deshacer.')) return;
+    noPersist = true;
+    SAVE_FILES.forEach(function (n) { localStorage.removeItem('sonic2:' + n); });
+    location.reload();
+  });
+
+  // Que las flechas y el espacio no hagan scroll en la página
+  window.addEventListener('keydown', function (e) {
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].indexOf(e.key) > -1) e.preventDefault();
+  }, { passive: false });
+</script>
+</body>
+</html>
