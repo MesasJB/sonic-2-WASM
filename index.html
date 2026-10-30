@@ -77,6 +77,7 @@
   </div>
 
 <script>
+  var BUILD_VERSION = '3';   // subí este número si publicás una compilación nueva
   var statusEl   = document.getElementById('status');
   var progressEl = document.getElementById('progress');
   var playBtn    = document.getElementById('playBtn');
@@ -147,6 +148,7 @@
   // Configuración que Emscripten espera encontrar
   var Module = {
     canvas: canvas,
+    locateFile: function (path) { return /\.wasm$/.test(path) ? path + '?v=' + BUILD_VERSION : path; },
     preRun: [restoreSaves],
     print: function () { logLine(arguments); console.log.apply(console, arguments); },
     printErr: function () { logLine(arguments); console.warn.apply(console, arguments); },
@@ -192,7 +194,7 @@
     Module.setStatus('Descargando…');
 
     var s = document.createElement('script');
-    s.src = 'index.js';
+    s.src = 'index.js?v=' + BUILD_VERSION;
     s.onerror = function () { statusEl.textContent = 'No se pudo cargar index.js'; playBtn.disabled = false; playBtn.textContent = '▶ Jugar'; };
     document.body.appendChild(s);
 
@@ -236,6 +238,7 @@
   function showDiag(extra) {
     var ctx = getSdlCtx();
     var lines = [
+      'Build con audio propio cargado: ' + (typeof Module._web_audio_fill === 'function' ? 'sí' : 'NO (el index.wasm que se descargó es viejo)'),
       'Audio propio (Web Audio): ' + (window.__sonicAudio ? 'sí' : 'NO') + ' | SDL2 audio: ' + (Module.SDL2 ? 'sí' : 'no'),
       'AudioContext del juego: ' + (ctx ? ctx.state + ' @ ' + ctx.sampleRate + ' Hz' : 'NO EXISTE (el juego no abrió audio)'),
       'Pestaña silenciada por el navegador: revisá el ícono de la pestaña',
